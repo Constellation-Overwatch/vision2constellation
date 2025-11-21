@@ -125,7 +125,7 @@ class OverwatchOrchestrator:
         total_kv_updates = 0
 
         print("Press 'q' to quit the stream.")
-        print(f"Publishing to KV store key pattern: {self.communication.entity_id}.detections.*")
+        print(f"Publishing to KV store key: {self.communication.entity_id} (consolidated EntityState)")
         print(f"Minimum frames for persistence: {args.min_frames}")
         print(f"\nSmart Publishing Thresholds:")
         print(f"  Movement threshold: {self.movement_threshold*100:.1f}% (SIGINT_MOVEMENT_THRESHOLD)")

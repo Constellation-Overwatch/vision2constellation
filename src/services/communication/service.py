@@ -12,7 +12,7 @@ from .publisher import ConstellationPublisher, build_kv_key
 
 class OverwatchCommunication:
     """Service for managing NATS/JetStream communications."""
-    
+
     def __init__(self):
         self.nc: Optional[nats.NATS] = None
         self.js = None
@@ -23,6 +23,7 @@ class OverwatchCommunication:
         self.stream_name: Optional[str] = None
         self.device_fingerprint: Optional[Dict] = None
         self.publisher: Optional[ConstellationPublisher] = None
+        self._entity_state_cache: Optional[Dict] = None  # Cache for entity state
 
         # Configuration
         self.nats_config = DEFAULT_CONFIG["nats"]
@@ -115,6 +116,65 @@ class OverwatchCommunication:
         except Exception as e:
             print(f"Error publishing bootsequence: {e}")
     
+    async def _get_entity_state(self) -> Dict[str, Any]:
+        """
+        Get current EntityState from KV or return base structure.
+        Uses in-memory cache to avoid excessive KV reads.
+        """
+        if self._entity_state_cache:
+            return self._entity_state_cache
+
+        try:
+            # Try to get existing state from KV
+            entry = await self.kv.get(self.entity_id)
+            if entry and entry.value:
+                self._entity_state_cache = json.loads(entry.value.decode())
+                return self._entity_state_cache
+        except Exception:
+            pass  # State doesn't exist yet, will create new
+
+        # Return base EntityState structure
+        self._entity_state_cache = {
+            "entity_id": self.entity_id,
+            "organization_id": self.organization_id,
+            "device_id": self.device_fingerprint['device_id'],
+            "status": "active",
+            "is_live": True,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "detections": {},
+            "analytics": {},
+            "c4isr": {}
+        }
+        return self._entity_state_cache
+
+    async def _update_entity_state(self, subsignal: str, data: Dict[str, Any]) -> None:
+        """
+        Update a specific subsignal scope within EntityState and persist to KV.
+
+        Args:
+            subsignal: The scope to update ('detections', 'analytics', 'c4isr')
+            data: The data to merge into that scope
+        """
+        try:
+            # Get current state
+            entity_state = await self._get_entity_state()
+
+            # Update the specific subsignal scope
+            entity_state[subsignal] = data
+            entity_state["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+            # Write consolidated state to single KV key
+            await self.kv.put(
+                self.entity_id,
+                json.dumps(entity_state).encode()
+            )
+
+            # Update cache
+            self._entity_state_cache = entity_state
+
+        except Exception as e:
+            print(f"Error updating entity state [{subsignal}]: {e}")
+
     async def publish_detection_event(self, detection_data: Dict[str, Any]) -> None:
         """Publish detection event to JetStream using publisher abstraction."""
         if not self.js:
@@ -144,23 +204,24 @@ class OverwatchCommunication:
             print(f"Error publishing detection event: {e}")
     
     async def publish_state_to_kv(self, tracking_state: Any, analytics: Dict[str, Any]) -> None:
-        """Publish tracking state to KV store."""
+        """
+        Publish tracking state to consolidated EntityState in KV store.
+        Updates both 'detections' and 'analytics' subsignals.
+        """
         if not self.kv or not self.entity_id:
             return
-        
+
         try:
-            # Prepare state data
-            state_data = {
+            # Prepare detections data
+            detections_data = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "entity_id": self.entity_id,
-                "device_id": self.device_fingerprint['device_id'],
-                "analytics": analytics
+                "objects": {}
             }
-            
+
             # Add tracking objects if available
             if hasattr(tracking_state, 'get_persistent_objects'):
                 persistent_objects = tracking_state.get_persistent_objects(min_frames=3)
-                state_data["tracked_objects"] = {
+                detections_data["objects"] = {
                     str(tid): {
                         "track_id": obj.get("track_id", obj.get("segment_id", tid)),
                         "label": obj.get("label", "segment"),
@@ -176,54 +237,61 @@ class OverwatchCommunication:
                     }
                     for tid, obj in persistent_objects.items()
                 }
-            
-            # Store in KV with hierarchical key using helper
-            key = build_kv_key(self.entity_id, "detections", "objects")
-            await self.kv.put(key, json.dumps(state_data).encode())
 
-            # Store analytics separately
-            analytics_key = build_kv_key(self.entity_id, "analytics", "summary")
-            await self.kv.put(analytics_key, json.dumps({
+            # Prepare analytics data
+            analytics_data = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "entity_id": self.entity_id,
-                **analytics
-            }).encode())
-            
+                "summary": analytics
+            }
+
+            # Update EntityState with both subsignals
+            await self._update_entity_state("detections", detections_data)
+            await self._update_entity_state("analytics", analytics_data)
+
         except Exception as e:
             print(f"Error publishing state to KV: {e}")
     
     async def publish_threat_intelligence(self, tracking_state: Any) -> None:
-        """Publish C4ISR threat intelligence to KV store."""
+        """
+        Publish C4ISR threat intelligence to consolidated EntityState.
+        Updates 'c4isr' subsignal and enriches 'analytics' with C4ISR summary.
+        """
         if not self.kv or not hasattr(tracking_state, 'threat_alerts'):
             return
 
         try:
             analytics = tracking_state.get_analytics()
-            threat_data = {
+
+            # Prepare C4ISR threat intelligence data
+            c4isr_data = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "entity_id": self.entity_id,
-                "device_id": self.device_fingerprint['device_id'],
                 "mission": "C4ISR",
-                "analytics": analytics,
-                "threat_summary": {
-                    "total_threats": analytics.get("active_threat_count", 0),
-                    "threat_distribution": analytics.get("threat_distribution", {}),
-                    "alert_level": "HIGH" if analytics.get("threat_distribution", {}).get("HIGH_THREAT", 0) > 0 else "NORMAL"
-                },
-                "threat_alerts": analytics.get("threat_alerts", [])
+                "threat_intelligence": {
+                    "threat_summary": {
+                        "total_threats": analytics.get("active_threat_count", 0),
+                        "threat_distribution": analytics.get("threat_distribution", {}),
+                        "alert_level": "HIGH" if analytics.get("threat_distribution", {}).get("HIGH_THREAT", 0) > 0 else "NORMAL"
+                    },
+                    "threat_alerts": analytics.get("threat_alerts", [])
+                }
             }
 
-            # Store full threat intelligence
-            key = build_kv_key(self.entity_id, "c4isr", "threat_intelligence")
-            await self.kv.put(key, json.dumps(threat_data).encode())
+            # Update C4ISR subsignal in EntityState
+            await self._update_entity_state("c4isr", c4isr_data)
 
-            # Store C4ISR analytics summary (for existing pattern compatibility)
-            c4isr_summary_key = build_kv_key(self.entity_id, "analytics", "c4isr_summary")
-            await self.kv.put(c4isr_summary_key, json.dumps({
+            # Also update analytics.c4isr_summary for backward compatibility
+            entity_state = await self._get_entity_state()
+            if "analytics" not in entity_state:
+                entity_state["analytics"] = {}
+            entity_state["analytics"]["c4isr_summary"] = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "entity_id": self.entity_id,
                 **analytics
-            }).encode())
+            }
+            entity_state["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+            # Write updated state
+            await self.kv.put(self.entity_id, json.dumps(entity_state).encode())
+            self._entity_state_cache = entity_state
 
         except Exception as e:
             print(f"Error publishing threat intelligence to KV: {e}")
