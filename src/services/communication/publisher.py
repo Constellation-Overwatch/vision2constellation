@@ -277,20 +277,24 @@ def validate_entity_id(entity_id: str) -> bool:
 
 def build_kv_key(entity_id: str, *segments: str) -> str:
     """
-    Build NATS KV-compliant hierarchical key.
+    Build NATS KV hierarchical key using dot notation.
 
-    Ensures keys use underscores (not dots) to avoid NATS KV validation errors.
+    Note: Dots are VALID in KV keys. The Overwatch restriction on dots
+    applies to entity_id VALUES only, not KV key paths.
 
     Args:
-        entity_id: Base entity identifier
+        entity_id: Base entity identifier (must be dot-free)
         *segments: Additional key segments
 
     Returns:
-        KV-compliant key string
+        Hierarchical key string
 
     Example:
         build_kv_key("abc123", "detections", "objects")
-        # Returns: "entity_abc123_detections_objects"
+        # Returns: "abc123.detections.objects"
+
+        build_kv_key("abc123", "analytics", "summary")
+        # Returns: "abc123.analytics.summary"
     """
-    parts = ["entity", entity_id] + list(segments)
-    return "_".join(parts)
+    parts = [entity_id] + list(segments)
+    return ".".join(parts)
