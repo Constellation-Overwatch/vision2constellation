@@ -60,7 +60,7 @@ class OverwatchOrchestrator:
         
         # Initialize communication
         self.communication = OverwatchCommunication()
-        await self.communication.initialize(self.device_fingerprint)
+        await self.communication.initialize(self.device_fingerprint, self.detection_mode.value)
         
         # Initialize tracking service
         self.tracking_service = TrackingService(self.detection_mode)

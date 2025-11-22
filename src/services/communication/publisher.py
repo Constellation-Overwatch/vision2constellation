@@ -57,7 +57,7 @@ class ConstellationPublisher:
             Enriched payload with identity fields
         """
         return {
-            "organization_id": self.organization_id,
+            "org_id": self.organization_id,
             "entity_id": self.entity_id,
             "device_id": self.device_id,
             **payload

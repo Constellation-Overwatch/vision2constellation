@@ -24,13 +24,15 @@ class OverwatchCommunication:
         self.device_fingerprint: Optional[Dict] = None
         self.publisher: Optional[ConstellationPublisher] = None
         self._entity_state_cache: Optional[Dict] = None  # Cache for entity state
+        self.detection_mode: Optional[str] = None
 
         # Configuration
         self.nats_config = DEFAULT_CONFIG["nats"]
-    
-    async def initialize(self, device_fingerprint: Dict[str, Any]) -> None:
+
+    async def initialize(self, device_fingerprint: Dict[str, Any], detection_mode: str = "detection") -> None:
         """Initialize NATS connection and setup streams."""
         self.device_fingerprint = device_fingerprint
+        self.detection_mode = detection_mode
         
         # Get constellation identifiers
         self.organization_id, self.entity_id = get_constellation_ids()
@@ -136,11 +138,17 @@ class OverwatchCommunication:
         # Return base EntityState structure
         self._entity_state_cache = {
             "entity_id": self.entity_id,
-            "organization_id": self.organization_id,
+            "org_id": self.organization_id,
             "device_id": self.device_fingerprint['device_id'],
+            "entity_type": "isr_sensor",
             "status": "active",
             "is_live": True,
             "updated_at": datetime.now(timezone.utc).isoformat(),
+            "mission": {
+                "mode": self.detection_mode or "detection",
+                "status": "operational",
+                "started_at": datetime.now(timezone.utc).isoformat()
+            },
             "detections": {},
             "analytics": {},
             "c4isr": {}

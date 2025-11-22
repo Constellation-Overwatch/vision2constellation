@@ -4,10 +4,10 @@ import os
 
 # NATS/JetStream configuration
 NATS_CONFIG = {
-    "url": "nats://localhost:4222",
-    "subject_root": "constellation.events.isr",
-    "stream_name": "CONSTELLATION_EVENTS",
-    "kv_store_name": "CONSTELLATION_GLOBAL_STATE"
+    "url": os.getenv("NATS_URL", "nats://localhost:4222"),
+    "subject_root": os.getenv("NATS_SUBJECT_ROOT", "constellation.events.isr"),
+    "stream_name": os.getenv("NATS_STREAM_NAME", "CONSTELLATION_EVENTS"),
+    "kv_store_name": os.getenv("NATS_KV_STORE_NAME", "CONSTELLATION_GLOBAL_STATE")
 }
 
 # Video configuration
