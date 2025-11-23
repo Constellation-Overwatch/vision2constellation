@@ -243,11 +243,10 @@ class VideoService:
         window_height = self.video_config["window_height"]
         cv2.resizeWindow(self.window_title, window_width, window_height)
         
-        # Center window
-        screen_width = self.video_config["screen_width"] 
-        screen_height = self.video_config["screen_height"]
-        x_pos = max(50, (screen_width - window_width) // 2)
-        y_pos = max(100, (screen_height - window_height) // 2)
+        # Set fixed position to ensure it's always visible and easy to drag
+        # Using a safe offset from top-left rather than centering based on potentially incorrect screen dimensions
+        x_pos = 100
+        y_pos = 100
         cv2.moveWindow(self.window_title, x_pos, y_pos)
         
         print(f"\nOpenCV Window Setup:")
