@@ -17,10 +17,13 @@ except ImportError:
     pass  # dotenv not available, skip
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import Any
 
 from .config.models import DetectionMode, get_default_mode
+from .config.defaults import DEFAULT_CONFIG
+from .utils.frame_encoder import encode_frame, calculate_frame_interval
 from .utils.args import parse_arguments, validate_arguments
 from .utils.device import get_device_fingerprint
 from .utils.signals import setup_signal_handlers
@@ -45,6 +48,11 @@ class OverwatchOrchestrator:
         # Configurable thresholds via environment variables
         self.movement_threshold = float(os.getenv('SIGINT_MOVEMENT_THRESHOLD', '0.05'))  # Default: 5% bbox movement
         self.confidence_threshold = float(os.getenv('SIGINT_CONFIDENCE_THRESHOLD', '0.1'))  # Default: 10% confidence change
+
+        # Frame streaming configuration
+        self.frame_stream_config = DEFAULT_CONFIG["frame_stream"]
+        self.frame_interval = calculate_frame_interval(self.frame_stream_config["target_fps"])
+        self.last_frame_publish_time = 0.0
     
     async def initialize(self, args) -> None:
         """Initialize all services."""
@@ -138,7 +146,18 @@ class OverwatchOrchestrator:
         print(f"Minimum frames for persistence: {args.min_frames}")
         print(f"\nSmart Publishing Thresholds:")
         print(f"  Movement threshold: {self.movement_threshold*100:.1f}% (SIGINT_MOVEMENT_THRESHOLD)")
-        print(f"  Confidence threshold: {self.confidence_threshold*100:.1f}% (SIGINT_CONFIDENCE_THRESHOLD)\n")
+        print(f"  Confidence threshold: {self.confidence_threshold*100:.1f}% (SIGINT_CONFIDENCE_THRESHOLD)")
+
+        # Frame streaming info
+        if self.frame_stream_config["enabled"]:
+            print(f"\nFrame Streaming: ENABLED")
+            print(f"  Target FPS: {self.frame_stream_config['target_fps']}")
+            print(f"  JPEG Quality: {self.frame_stream_config['jpeg_quality']}")
+            print(f"  Max Dimension: {self.frame_stream_config['max_dimension']}px")
+            print(f"  Include Detections: {self.frame_stream_config['include_detections']}")
+        else:
+            print(f"\nFrame Streaming: DISABLED (set ENABLE_FRAME_STREAMING=true to enable)")
+        print()
         
         try:
             while True:
@@ -225,11 +244,35 @@ class OverwatchOrchestrator:
                     'active_count': analytics.get('active_objects_count', 0),
                     'total_unique': analytics.get('total_unique_objects', 0)
                 }
-                
+
                 processed_frame = self.detector.add_status_overlay(
                     processed_frame, self.device_fingerprint['device_id'], stats
                 )
-                
+
+                # Stream frame if enabled and interval elapsed
+                if self.frame_stream_config["enabled"]:
+                    current_time = time.monotonic()
+                    if current_time - self.last_frame_publish_time >= self.frame_interval:
+                        # Choose frame to stream (with or without detections overlay)
+                        frame_to_stream = processed_frame if self.frame_stream_config["include_detections"] else frame
+
+                        # Encode and publish frame
+                        frame_bytes, frame_metadata = encode_frame(
+                            frame_to_stream,
+                            jpeg_quality=self.frame_stream_config["jpeg_quality"],
+                            max_dimension=self.frame_stream_config["max_dimension"]
+                        )
+
+                        await self.communication.publish_frame(
+                            frame_bytes=frame_bytes,
+                            frame_number=frame_count,
+                            timestamp=frame_timestamp,
+                            metadata=frame_metadata,
+                            detection_count=len(detections)
+                        )
+
+                        self.last_frame_publish_time = current_time
+
                 # Display frame and check for quit
                 if self.video_service.display_frame(processed_frame):
                     break
@@ -237,20 +280,26 @@ class OverwatchOrchestrator:
         finally:
             await self._print_final_stats(frame_count, total_detections, total_kv_updates)
     
-    async def _print_final_stats(self, frame_count: int, total_detections: int, 
+    async def _print_final_stats(self, frame_count: int, total_detections: int,
                                 total_kv_updates: int) -> None:
         """Print final statistics."""
         print(f"\n=== Final Detection Statistics ===")
         print(f"Total frames processed: {frame_count}")
         print(f"Total detections: {total_detections}")
-        
+
         analytics = self.tracking_service.get_analytics()
         print(f"Total unique objects: {analytics.get('total_unique_objects', 0)}")
         print(f"Total KV updates: {total_kv_updates}")
-        
+
         if hasattr(self.tracking_service.state, 'threat_alerts'):
             print(f"Total threat alerts: {len(self.tracking_service.state.threat_alerts)}")
-        
+
+        # Frame streaming stats
+        if self.communication:
+            frame_stats = self.communication.get_frame_stream_stats()
+            if frame_stats["enabled"]:
+                print(f"Frames streamed: {frame_stats['frames_published']}")
+
         print("=" * 35)
     
     async def cleanup(self) -> None:

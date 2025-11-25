@@ -28,6 +28,12 @@ class OverwatchCommunication:
 
         # Configuration
         self.nats_config = DEFAULT_CONFIG["nats"]
+        self.frame_stream_config = DEFAULT_CONFIG["frame_stream"]
+
+        # Video frame streaming
+        self.video_subject: Optional[str] = None
+        self.frame_stream_enabled = self.frame_stream_config["enabled"]
+        self._frame_count = 0
 
     async def initialize(self, device_fingerprint: Dict[str, Any], detection_mode: str = "detection") -> None:
         """Initialize NATS connection and setup streams."""
@@ -47,10 +53,18 @@ class OverwatchCommunication:
         # Construct subject and stream names
         self.subject = f"{self.nats_config['subject_root']}.{self.organization_id}.{self.entity_id}"
         self.stream_name = self.nats_config["stream_name"]
-        
+
+        # Construct video subject if frame streaming is enabled
+        if self.frame_stream_enabled:
+            self.video_subject = f"{self.frame_stream_config['subject_root']}.{self.organization_id}.{self.entity_id}"
+
         print(f"Configured NATS subject: {self.subject}")
         print(f"Configured stream name: {self.stream_name}")
-        print(f"Configured KV store: {self.nats_config['kv_store_name']}\n")
+        print(f"Configured KV store: {self.nats_config['kv_store_name']}")
+        if self.frame_stream_enabled:
+            print(f"Configured video subject: {self.video_subject}")
+            print(f"Configured video stream: {self.frame_stream_config['stream_name']}")
+        print()
         
         # Connect to NATS
         await self._connect_nats()
@@ -59,9 +73,17 @@ class OverwatchCommunication:
         await self._publish_bootsequence()
     
     async def _connect_nats(self) -> None:
-        """Connect to NATS server."""
+        """Connect to NATS server with optional token authentication."""
         print(f"Attempting to connect to NATS at: {self.nats_config['url']}")
-        self.nc = await nats.connect(self.nats_config["url"])
+
+        connect_opts = {"servers": [self.nats_config["url"]]}
+
+        # Token-based authentication
+        if self.nats_config.get("auth_token"):
+            connect_opts["token"] = self.nats_config["auth_token"]
+            print("Using token-based authentication")
+
+        self.nc = await nats.connect(**connect_opts)
         print("Connected to NATS server")
     
     async def _setup_jetstream(self) -> None:
@@ -304,7 +326,71 @@ class OverwatchCommunication:
 
         except Exception as e:
             print(f"Error publishing threat intelligence to KV: {e}")
-    
+
+    async def publish_frame(
+        self,
+        frame_bytes: bytes,
+        frame_number: int,
+        timestamp: str,
+        metadata: Dict[str, Any],
+        detection_count: int = 0
+    ) -> bool:
+        """
+        Publish video frame to JetStream.
+
+        Args:
+            frame_bytes: JPEG-encoded frame bytes
+            frame_number: Frame sequence number
+            timestamp: ISO 8601 timestamp
+            metadata: Frame metadata (width, height, etc.)
+            detection_count: Number of detections in frame
+
+        Returns:
+            True if published successfully, False otherwise
+        """
+        if not self.js or not self.frame_stream_enabled or not self.video_subject:
+            return False
+
+        try:
+            self._frame_count += 1
+
+            headers = {
+                "Content-Type": "image/jpeg",
+                "Event-Type": "video_frame",
+                "Frame-Number": str(frame_number),
+                "Timestamp": timestamp,
+                "Width": str(metadata.get("width", 0)),
+                "Height": str(metadata.get("height", 0)),
+                "Original-Width": str(metadata.get("original_width", metadata.get("width", 0))),
+                "Original-Height": str(metadata.get("original_height", metadata.get("height", 0))),
+                "Detection-Count": str(detection_count),
+                "Device-ID": self.device_fingerprint['device_id'],
+                "Org-ID": self.organization_id,
+                "Entity-ID": self.entity_id,
+                "Size-Bytes": str(metadata.get("size_bytes", len(frame_bytes))),
+                "Quality": str(metadata.get("quality", 75)),
+            }
+
+            await self.js.publish(
+                self.video_subject,
+                frame_bytes,
+                headers=headers
+            )
+            return True
+
+        except Exception as e:
+            print(f"Error publishing frame: {e}")
+            return False
+
+    def get_frame_stream_stats(self) -> Dict[str, Any]:
+        """Get frame streaming statistics."""
+        return {
+            "enabled": self.frame_stream_enabled,
+            "frames_published": self._frame_count,
+            "video_subject": self.video_subject,
+            "target_fps": self.frame_stream_config.get("target_fps", 15),
+        }
+
     async def cleanup(self, final_analytics: Optional[Dict] = None) -> None:
         """Clean up connections and publish shutdown event using publisher abstraction."""
         if self.js and self.device_fingerprint:
