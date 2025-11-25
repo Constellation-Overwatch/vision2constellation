@@ -73,7 +73,7 @@ sequenceDiagram
 
         alt Frame Streaming Enabled
             Client->>Client: Encode frame (JPEG)
-            Client->>NATS: Publish video frame<br/>(constellation.video.{org}.{entity})
+            Client->>NATS: Publish raw JPEG bytes<br/>(constellation.video.{entity})
         end
 
         Client->>Client: Display annotated video
@@ -297,8 +297,8 @@ vision2constellation/
 constellation.events.isr.{organization_id}.{entity_id}
                     └── Detection events, bootsequence, shutdown
 
-constellation.video.{organization_id}.{entity_id}
-                    └── Video frame stream (JPEG binary)
+constellation.video.{entity_id}
+                    └── Video frame stream (raw JPEG bytes)
 ```
 
 ### JetStream Streams
@@ -332,7 +332,7 @@ Enable real-time video streaming to your backend by setting `ENABLE_FRAME_STREAM
 
 ### Frame Message Format
 
-Video frames are published as binary JPEG data with metadata in headers:
+Video frames are published as **raw JPEG bytes** (no JSON wrapping) with metadata in headers:
 
 | Header | Description |
 |--------|-------------|
@@ -340,10 +340,15 @@ Video frames are published as binary JPEG data with metadata in headers:
 | `Frame-Number` | Sequential frame number |
 | `Timestamp` | ISO 8601 UTC timestamp |
 | `Width` / `Height` | Encoded frame dimensions |
-| `Original-Width` / `Original-Height` | Source frame dimensions |
 | `Detection-Count` | Number of detections in frame |
 | `Device-ID` | Device fingerprint |
-| `Org-ID` / `Entity-ID` | Constellation identifiers |
+| `Entity-ID` | Entity identifier |
+
+**Key Points:**
+- **NO JSON** - Raw image bytes sent directly
+- **JPEG preferred** - Smaller than PNG, good for video
+- **Quality 75** - Good balance for streaming (configurable via `FRAME_JPEG_QUALITY`)
+- **Max frame size** - 2MB (configured in NATS stream)
 
 ### Consuming Frames (Python Example)
 
@@ -355,9 +360,11 @@ async def consume_video_frames():
     nc = await nats.connect("nats://localhost:4222", token="your-token")
     js = nc.jetstream()
 
+    entity_id = "your-entity-id"
+
     # Subscribe to live frames (ephemeral consumer)
     sub = await js.subscribe(
-        "constellation.video.{org_id}.{entity_id}",
+        f"constellation.video.{entity_id}",
         stream="CONSTELLATION_VIDEO_FRAMES",
         config=ConsumerConfig(
             deliver_policy=DeliverPolicy.NEW,
@@ -366,10 +373,10 @@ async def consume_video_frames():
     )
 
     async for msg in sub.messages:
-        frame_bytes = msg.data  # Raw JPEG bytes
+        frame_bytes = msg.data  # Raw JPEG bytes (starts with FF D8 FF)
         frame_num = msg.headers.get("Frame-Number")
         detection_count = msg.headers.get("Detection-Count")
-        # Process frame...
+        # Process frame - e.g., save to file, forward to WebSocket, etc.
 ```
 
 ### Bandwidth Estimates

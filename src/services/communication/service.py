@@ -55,8 +55,9 @@ class OverwatchCommunication:
         self.stream_name = self.nats_config["stream_name"]
 
         # Construct video subject if frame streaming is enabled
+        # Subject format: constellation.video.{entity_id} (per spec)
         if self.frame_stream_enabled:
-            self.video_subject = f"{self.frame_stream_config['subject_root']}.{self.organization_id}.{self.entity_id}"
+            self.video_subject = f"{self.frame_stream_config['subject_root']}.{self.entity_id}"
 
         print(f"Configured NATS subject: {self.subject}")
         print(f"Configured stream name: {self.stream_name}")
