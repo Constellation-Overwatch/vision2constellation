@@ -10,6 +10,7 @@ from argparse import Namespace
 
 from ...config.defaults import DEFAULT_CONFIG
 from ...utils.device import enumerate_video_devices, print_device_list
+from ...utils.rtsp_discovery import discover_rtsp_streams, select_stream
 
 class VideoService:
     """Service for managing video capture and display."""
@@ -43,6 +44,10 @@ class VideoService:
         # RTSP URL
         elif self.args.rtsp:
             return self._setup_rtsp_source()
+
+        # RTSP Discovery
+        elif getattr(self.args, 'rtsp_discover', False):
+            return self._setup_rtsp_discovery()
         
         # HTTP stream
         elif self.args.http:
@@ -72,6 +77,30 @@ class VideoService:
         print(f"Connecting to: {self.args.rtsp}")
         print("========================\n")
         return self.args.rtsp, "rtsp", None
+
+    def _setup_rtsp_discovery(self) -> Tuple[str, str, None]:
+        """Discover and setup RTSP stream source."""
+        auto_select = getattr(self.args, 'auto', False)
+
+        # Discover streams on the network
+        streams = discover_rtsp_streams(validate=True)
+
+        if not streams:
+            print("\nNo RTSP streams found on the network.")
+            print("Try specifying a stream directly with --rtsp <url>")
+            sys.exit(1)
+
+        # Select stream (auto or interactive)
+        selected_url = select_stream(streams, auto=auto_select)
+
+        if not selected_url:
+            print("\nNo stream selected. Exiting.")
+            sys.exit(0)
+
+        print(f"\n=== RTSP Stream Mode (Discovered) ===")
+        print(f"Connecting to: {selected_url}")
+        print("=====================================\n")
+        return selected_url, "rtsp", None
     
     def _setup_http_source(self) -> Tuple[str, str, None]:
         """Setup HTTP stream source."""
@@ -141,6 +170,11 @@ class VideoService:
             # macOS: use AVFoundation explicitly
             self.cap = cv2.VideoCapture(self.video_source, cv2.CAP_AVFOUNDATION)
             print(f"Opening camera index {self.video_source} with AVFoundation backend...")
+        elif self.source_type in ["rtsp", "http"]:
+            # For RTSP/HTTP streams, try FFmpeg backend explicitly with options
+            self.cap = self._open_stream_with_retries()
+            if self.cap is None:
+                return False
         else:
             self.cap = cv2.VideoCapture(self.video_source)
         
@@ -158,6 +192,43 @@ class VideoService:
             self._verify_camera_device()
         
         return True
+    
+    def _open_stream_with_retries(self) -> Optional[cv2.VideoCapture]:
+        """Open RTSP/HTTP stream with backend selection and retry logic."""
+        # Try different backends in order of preference
+        backends = [
+            (cv2.CAP_FFMPEG, "FFMPEG"),
+            (cv2.CAP_ANY, "AUTO"),
+        ]
+        
+        for backend_id, backend_name in backends:
+            print(f"Attempting to open stream with {backend_name} backend...")
+            
+            cap = cv2.VideoCapture(self.video_source, backend_id)
+            
+            # Configure stream options before opening
+            if self.source_type == "rtsp":
+                # RTSP-specific options for low latency
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimal buffer
+                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)  # 10 second timeout
+                cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)  # 10 second read timeout
+            
+            # Try to read a test frame to verify the stream works
+            if cap.isOpened():
+                print(f"Stream opened with {backend_name}, testing...")
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    print(f"✓ Successfully connected with {backend_name} backend\n")
+                    return cap
+                else:
+                    print(f"✗ Stream opened but failed to read frame with {backend_name}")
+                    cap.release()
+            else:
+                print(f"✗ Failed to open with {backend_name} backend")
+        
+        print(f"\n✗ Failed to open stream with any backend")
+        self._print_troubleshooting()
+        return None
     
     def _apply_stream_optimizations(self) -> None:
         """Apply source-specific optimizations."""

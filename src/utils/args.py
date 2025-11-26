@@ -47,10 +47,15 @@ def parse_arguments() -> Namespace:
         help='Device path (e.g., /dev/video4)'
     )
     source_group.add_argument(
-        '--rtsp', 
-        type=str, 
+        '--rtsp',
+        type=str,
         default=None,
         help='RTSP URL (e.g., rtsp://192.168.50.2:8554/live/stream)'
+    )
+    source_group.add_argument(
+        '--rtsp-discover',
+        action='store_true',
+        help='Auto-discover RTSP streams on the local network'
     )
     source_group.add_argument(
         '--http', 
@@ -81,9 +86,14 @@ def parse_arguments() -> Namespace:
     
     # Additional camera options
     parser.add_argument(
-        '--skip-native', 
+        '--skip-native',
         action='store_true',
         help='Skip built-in/native cameras during auto-detection'
+    )
+    parser.add_argument(
+        '--auto',
+        action='store_true',
+        help='Auto-select first discovered stream (use with --rtsp-discover)'
     )
     
     # Detection parameters
