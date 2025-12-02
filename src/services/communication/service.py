@@ -35,13 +35,19 @@ class OverwatchCommunication:
         self.frame_stream_enabled = self.frame_stream_config["enabled"]
         self._frame_count = 0
 
-    async def initialize(self, device_fingerprint: Dict[str, Any], detection_mode: str = "detection") -> None:
+    async def initialize(
+        self,
+        device_fingerprint: Dict[str, Any],
+        detection_mode: str = "detection",
+        cli_org_id: Optional[str] = None,
+        cli_entity_id: Optional[str] = None
+    ) -> None:
         """Initialize NATS connection and setup streams."""
         self.device_fingerprint = device_fingerprint
         self.detection_mode = detection_mode
-        
-        # Get constellation identifiers
-        self.organization_id, self.entity_id = get_constellation_ids()
+
+        # Get constellation identifiers (CLI args override env vars)
+        self.organization_id, self.entity_id = get_constellation_ids(cli_org_id, cli_entity_id)
 
         # Initialize publisher abstraction with identity context
         self.publisher = ConstellationPublisher(
@@ -257,12 +263,14 @@ class OverwatchCommunication:
                     str(tid): {
                         "track_id": obj.get("track_id", obj.get("segment_id", tid)),
                         "label": obj.get("label", "segment"),
+                        "category": obj.get("category"),  # RT-DETR category (person, vehicle, etc.)
+                        "priority": obj.get("priority"),  # RT-DETR priority level
                         "first_seen": obj["first_seen"],
                         "last_seen": obj["last_seen"],
                         "frame_count": obj["frame_count"],
                         "avg_confidence": obj.get("avg_confidence", 0),
                         "is_active": obj["is_active"],
-                        "threat_level": obj.get("threat_level"),
+                        "threat_level": obj.get("threat_level"),  # C4ISR threat level
                         "suspicious_indicators": obj.get("suspicious_indicators", []),
                         "area": obj.get("area"),
                         "current_bbox": obj.get("bbox_history", [])[-1] if obj.get("bbox_history") else obj.get("bbox")

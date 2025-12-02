@@ -147,11 +147,25 @@ def parse_arguments() -> Namespace:
     )
     parser.add_argument(
         '--max-objects',
-        type=int, 
+        type=int,
         default=50,
         help='Maximum objects to detect for Moondream (default: 50)'
     )
-    
+
+    # Constellation identity options
+    parser.add_argument(
+        '--entity-id',
+        type=str,
+        default=None,
+        help='Constellation Entity ID (overrides CONSTELLATION_ENTITY_ID env var)'
+    )
+    parser.add_argument(
+        '--org-id',
+        type=str,
+        default=None,
+        help='Constellation Organization ID (overrides CONSTELLATION_ORG_ID env var)'
+    )
+
     return parser.parse_args()
 
 def validate_arguments(args: Namespace) -> Namespace:

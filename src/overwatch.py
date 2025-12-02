@@ -16,6 +16,12 @@ try:
 except ImportError:
     pass  # dotenv not available, skip
 
+# CRITICAL: Set FFmpeg logging level BEFORE cv2 import to suppress RTSP warnings
+# These must be set before OpenCV initializes FFmpeg
+os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"  # AV_LOG_QUIET
+os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
+os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
+
 import asyncio
 import time
 from datetime import datetime, timezone
@@ -77,7 +83,12 @@ class OverwatchOrchestrator:
         
         # Initialize communication
         self.communication = OverwatchCommunication()
-        await self.communication.initialize(self.device_fingerprint, self.detection_mode.value)
+        await self.communication.initialize(
+            self.device_fingerprint,
+            self.detection_mode.value,
+            cli_org_id=args.org_id,
+            cli_entity_id=args.entity_id
+        )
         
         # Initialize tracking service
         self.tracking_service = TrackingService(self.detection_mode)
@@ -161,12 +172,16 @@ class OverwatchOrchestrator:
         
         try:
             while True:
-                # Read frame
+                # Read frame (video service handles RTSP errors internally)
                 ret, frame = self.video_service.read_frame()
-                if not ret:
-                    print("Error: Failed to capture frame.")
+                if not ret or frame is None:
+                    # For RTSP, this means reconnection failed after max retries
+                    if self.video_service.source_type in ["rtsp", "http"]:
+                        print(f"Stream ended after {self.video_service.total_reconnects} reconnection attempts.")
+                    else:
+                        print("Error: Failed to capture frame.")
                     break
-                
+
                 frame_count += 1
                 frame_timestamp = datetime.now(timezone.utc).isoformat()
                 self.tracking_service.update_frame_count(frame_count)

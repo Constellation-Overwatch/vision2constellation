@@ -23,15 +23,16 @@ class BaseTrackingState(ABC):
 
 class TrackingState(BaseTrackingState):
     """Standard object tracking state for YOLOE and RTDETR."""
-    
+
     def __init__(self):
         super().__init__()
         self.tracked_objects = {}  # track_id -> object metadata
         self.total_unique_objects = 0
         self.active_track_ids = set()
 
-    def update_object(self, track_id: Any, label: str, confidence: float, 
-                     bbox: Dict[str, float], frame_timestamp: str) -> None:
+    def update_object(self, track_id: Any, label: str, confidence: float,
+                     bbox: Dict[str, float], frame_timestamp: str,
+                     category: str = None, priority: str = None, **kwargs) -> None:
         """Update or create tracked object state."""
         if track_id not in self.tracked_objects:
             # New object detected
@@ -39,6 +40,8 @@ class TrackingState(BaseTrackingState):
             self.tracked_objects[track_id] = {
                 "track_id": track_id,
                 "label": label,
+                "category": category or "object",
+                "priority": priority or "normal",
                 "first_seen": frame_timestamp,
                 "last_seen": frame_timestamp,
                 "frame_count": 1,
@@ -56,6 +59,11 @@ class TrackingState(BaseTrackingState):
             obj["avg_confidence"] = obj["total_confidence"] / obj["frame_count"]
             obj["bbox_history"].append(bbox)
             obj["is_active"] = True
+            # Update category/priority if provided
+            if category:
+                obj["category"] = category
+            if priority:
+                obj["priority"] = priority
 
             # Keep only last 30 frames of bbox history
             if len(obj["bbox_history"]) > 30:
@@ -82,10 +90,12 @@ class TrackingState(BaseTrackingState):
         """Get tracking analytics summary."""
         active_objects = [obj for obj in self.tracked_objects.values() if obj["is_active"]]
 
-        # Count by label
+        # Count by label and category
         label_counts = defaultdict(int)
+        category_counts = defaultdict(int)
         for obj in active_objects:
             label_counts[obj["label"]] += 1
+            category_counts[obj.get("category", "object")] += 1
 
         return {
             "total_unique_objects": self.total_unique_objects,
@@ -93,6 +103,7 @@ class TrackingState(BaseTrackingState):
             "active_objects_count": len(active_objects),
             "tracked_objects_count": len(self.tracked_objects),
             "label_distribution": dict(label_counts),
+            "category_distribution": dict(category_counts),
             "active_track_ids": list(self.active_track_ids)
         }
 

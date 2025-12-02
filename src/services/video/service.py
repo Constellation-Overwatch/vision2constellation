@@ -5,6 +5,8 @@ import platform
 import subprocess
 import json
 import sys
+import time
+import os
 from typing import Dict, Any, Optional, Tuple, List
 from argparse import Namespace
 
@@ -14,7 +16,7 @@ from ...utils.rtsp_discovery import discover_rtsp_streams, select_stream
 
 class VideoService:
     """Service for managing video capture and display."""
-    
+
     def __init__(self, args: Namespace):
         self.args = args
         self.cap: Optional[cv2.VideoCapture] = None
@@ -22,9 +24,16 @@ class VideoService:
         self.source_type = None
         self.selected_device = None
         self.window_title = None
-        
+
         # Configuration
         self.video_config = DEFAULT_CONFIG["video"]
+
+        # RTSP resilience settings
+        self.max_consecutive_failures = int(os.getenv("RTSP_MAX_FAILURES", "30"))
+        self.reconnect_delay = float(os.getenv("RTSP_RECONNECT_DELAY", "1.0"))
+        self.consecutive_failures = 0
+        self.last_good_frame = None
+        self.total_reconnects = 0
     
     def determine_video_source(self) -> Tuple[Any, str, Optional[Dict]]:
         """Determine video source from arguments."""
@@ -72,9 +81,10 @@ class VideoService:
         return self.args.device, "device", None
     
     def _setup_rtsp_source(self) -> Tuple[str, str, None]:
-        """Setup RTSP stream source."""
+        """Setup RTSP stream source with concurrent access optimizations."""
         print(f"\n=== RTSP Stream Mode ===")
         print(f"Connecting to: {self.args.rtsp}")
+        print(f"Resilience: max_failures={self.max_consecutive_failures}, reconnect_delay={self.reconnect_delay}s")
         print("========================\n")
         return self.args.rtsp, "rtsp", None
 
@@ -195,37 +205,63 @@ class VideoService:
     
     def _open_stream_with_retries(self) -> Optional[cv2.VideoCapture]:
         """Open RTSP/HTTP stream with backend selection and retry logic."""
+        # For RTSP, construct URL with FFmpeg options for concurrent access
+        stream_url = self.video_source
+
+        if self.source_type == "rtsp":
+            # FFmpeg options for robust RTSP streaming over network:
+            # - rtsp_transport=tcp: Use TCP instead of UDP to avoid packet loss
+            # - buffer_size=1024000: Larger buffer for network jitter (1MB)
+            # - max_delay=500000: Max demuxing delay in microseconds
+            # - stimeout=5000000: Socket timeout 5 seconds
+            # - reorder_queue_size=500: Allow packet reordering for network delays
+            # - fflags=discardcorrupt: Discard corrupted frames instead of erroring
+            # - err_detect=ignore_err: Continue on decode errors
+            # - loglevel=quiet: Suppress FFmpeg warnings
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                "rtsp_transport;tcp|"
+                "buffer_size;1024000|"
+                "max_delay;500000|"
+                "stimeout;5000000|"
+                "reorder_queue_size;500|"
+                "fflags;discardcorrupt|"
+                "err_detect;ignore_err|"
+                "loglevel;quiet"
+            )
+            print("Applied FFmpeg RTSP options (TCP, 1MB buffer, error tolerance)")
+
         # Try different backends in order of preference
         backends = [
             (cv2.CAP_FFMPEG, "FFMPEG"),
             (cv2.CAP_ANY, "AUTO"),
         ]
-        
+
         for backend_id, backend_name in backends:
             print(f"Attempting to open stream with {backend_name} backend...")
-            
-            cap = cv2.VideoCapture(self.video_source, backend_id)
-            
-            # Configure stream options before opening
+
+            cap = cv2.VideoCapture(stream_url, backend_id)
+
+            # Configure stream options
             if self.source_type == "rtsp":
-                # RTSP-specific options for low latency
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimal buffer
-                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)  # 10 second timeout
+                # RTSP-specific options for network stability
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 10)  # Larger buffer for network jitter
+                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 15000)  # 15 second timeout
                 cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)  # 10 second read timeout
-            
+
             # Try to read a test frame to verify the stream works
             if cap.isOpened():
                 print(f"Stream opened with {backend_name}, testing...")
                 ret, frame = cap.read()
                 if ret and frame is not None:
-                    print(f"✓ Successfully connected with {backend_name} backend\n")
+                    print(f"✓ Successfully connected with {backend_name} backend")
+                    self.last_good_frame = frame.copy()
                     return cap
                 else:
                     print(f"✗ Stream opened but failed to read frame with {backend_name}")
                     cap.release()
             else:
                 print(f"✗ Failed to open with {backend_name} backend")
-        
+
         print(f"\n✗ Failed to open stream with any backend")
         self._print_troubleshooting()
         return None
@@ -327,10 +363,70 @@ class VideoService:
         print(f"  The window is draggable and resizable\n")
     
     def read_frame(self) -> Tuple[bool, Any]:
-        """Read frame from video capture."""
+        """Read frame from video capture with error recovery for RTSP streams."""
         if self.cap is None:
             return False, None
-        return self.cap.read()
+
+        ret, frame = self.cap.read()
+
+        # For RTSP/HTTP streams, handle frame errors gracefully
+        if self.source_type in ["rtsp", "http"]:
+            if ret and frame is not None:
+                # Success - reset failure counter and cache frame
+                self.consecutive_failures = 0
+                self.last_good_frame = frame.copy()
+                return True, frame
+            else:
+                # Frame read failed
+                self.consecutive_failures += 1
+
+                # Check if we should attempt reconnection
+                if self.consecutive_failures >= self.max_consecutive_failures:
+                    print(f"\n⚠️  {self.consecutive_failures} consecutive frame failures - attempting reconnect...")
+                    if self._reconnect_stream():
+                        self.consecutive_failures = 0
+                        # Try reading again after reconnect
+                        ret, frame = self.cap.read()
+                        if ret and frame is not None:
+                            self.last_good_frame = frame.copy()
+                            return True, frame
+
+                    # Reconnect failed - signal to stop
+                    print(f"✗ Reconnection failed after {self.total_reconnects} attempts")
+                    return False, None
+
+                # Return last good frame to maintain continuity (skip corrupted frame)
+                if self.last_good_frame is not None:
+                    return True, self.last_good_frame
+
+                # No cached frame available
+                return False, None
+
+        # For camera sources, use standard behavior
+        return ret, frame
+
+    def _reconnect_stream(self) -> bool:
+        """Attempt to reconnect to RTSP/HTTP stream."""
+        self.total_reconnects += 1
+        print(f"Reconnection attempt #{self.total_reconnects}...")
+
+        # Release current capture
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+
+        # Brief delay before reconnecting
+        time.sleep(self.reconnect_delay)
+
+        # Attempt to reopen
+        self.cap = self._open_stream_with_retries()
+
+        if self.cap and self.cap.isOpened():
+            print(f"✓ Successfully reconnected to stream")
+            return True
+
+        print(f"✗ Failed to reconnect")
+        return False
     
     def display_frame(self, frame: Any) -> bool:
         """Display frame and check for quit key."""
