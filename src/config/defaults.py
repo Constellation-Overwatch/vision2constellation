@@ -41,7 +41,7 @@ OPENCV_CONFIG = {
 # Video frame streaming configuration
 FRAME_STREAM_CONFIG = {
     "enabled": os.getenv("ENABLE_FRAME_STREAMING", "false").lower() == "true",
-    "codec": os.getenv("FRAME_CODEC", "h264"),  # "h264" (default) or "jpeg"
+    "codec": os.getenv("FRAME_CODEC", "jpeg"),  # "jpeg" (default) or "h264"
     "target_fps": int(os.getenv("FRAME_TARGET_FPS", "15")),
     "include_detections": os.getenv("FRAME_INCLUDE_DETECTIONS", "true").lower() == "true",
     "stream_name": os.getenv("NATS_VIDEO_STREAM_NAME", "CONSTELLATION_VIDEO_FRAMES"),

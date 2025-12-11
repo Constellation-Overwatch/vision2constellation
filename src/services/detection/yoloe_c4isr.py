@@ -139,20 +139,23 @@ class C4ISRThreatDetector(BaseDetector):
                 # Determine threat level
                 threat_level = CLASS_TO_THREAT_LEVEL.get(class_name, "NORMAL")
 
-                # Get or create CUID using centralized service
-                cuid = self.tracking_id_service.get_or_create_cuid(
+                # Normalize bbox for stable ID generation
+                bbox = {
+                    "x_min": x1 / frame.shape[1],
+                    "y_min": y1 / frame.shape[0], 
+                    "x_max": x2 / frame.shape[1],
+                    "y_max": y2 / frame.shape[0]
+                }
+
+                # Get or create stable CUID using spatial properties
+                cuid = self.tracking_id_service.get_stable_cuid(
+                    bbox=bbox,
+                    label=class_name,
+                    confidence=float(conf),
                     native_id=yolo_track_id,
                     model_type=self.model_type
                 )
                 current_track_ids.add(cuid)
-
-                # Normalize bbox
-                bbox = {
-                    "x_min": float(x1 / w),
-                    "y_min": float(y1 / h),
-                    "x_max": float(x2 / w),
-                    "y_max": float(y2 / h)
-                }
 
                 # Calculate suspicious indicators
                 suspicious_indicators = self._calculate_suspicious_indicators(

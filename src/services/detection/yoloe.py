@@ -70,12 +70,6 @@ class YOLOEDetector(BaseDetector):
                 # Get class name from COCO classes
                 class_name = result.names[cls_id]
 
-                # Get or create CUID using centralized service
-                cuid = self.tracking_id_service.get_or_create_cuid(
-                    native_id=yolo_track_id,
-                    model_type=self.model_type
-                )
-
                 # Normalize bbox coordinates
                 bbox = {
                     "x_min": float(x1 / w),
@@ -83,6 +77,15 @@ class YOLOEDetector(BaseDetector):
                     "x_max": float(x2 / w),
                     "y_max": float(y2 / h)
                 }
+
+                # Get or create stable CUID using spatial properties
+                cuid = self.tracking_id_service.get_stable_cuid(
+                    bbox=bbox,
+                    label=class_name,
+                    confidence=float(conf),
+                    native_id=yolo_track_id,
+                    model_type=self.model_type
+                )
 
                 # Create standardized detection payload
                 detection = self.tracking_id_service.format_detection_payload(

@@ -95,20 +95,23 @@ class RTDETRDetector(BaseDetector):
                 # Get category for this class
                 category = self._get_category(class_name)
 
-                # Get or create CUID using centralized service
-                cuid = self.tracking_id_service.get_or_create_cuid(
-                    native_id=native_track_id,
-                    model_type=self.model_type
-                )
-                current_track_ids.add(cuid)
-
-                # Normalize bbox coordinates
+                # Normalize bbox coordinates for stable ID generation
                 bbox = {
                     "x_min": float(x1 / w),
                     "y_min": float(y1 / h),
                     "x_max": float(x2 / w),
                     "y_max": float(y2 / h)
                 }
+
+                # Get or create stable CUID using spatial properties
+                cuid = self.tracking_id_service.get_stable_cuid(
+                    bbox=bbox,
+                    label=class_name,
+                    confidence=float(conf),
+                    native_id=native_track_id,
+                    model_type=self.model_type
+                )
+                current_track_ids.add(cuid)
 
                 # Create standardized detection payload (aligned with C4ISR format)
                 detection = self.tracking_id_service.format_detection_payload(

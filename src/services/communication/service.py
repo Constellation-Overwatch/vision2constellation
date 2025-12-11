@@ -27,6 +27,10 @@ class OverwatchCommunication:
         self.publisher: Optional[ConstellationPublisher] = None
         self._entity_state_cache: Optional[Dict] = None  # Cache for entity state
         self.detection_mode: Optional[str] = None
+        
+        # Idempotency tracking for detection events
+        self._published_detection_hashes: set = set()
+        self._state_update_lock: bool = False
 
         # Configuration
         self.nats_config = DEFAULT_CONFIG["nats"]
@@ -231,18 +235,53 @@ class OverwatchCommunication:
         except Exception as e:
             print(f"Error updating entity state [{subsignal}]: {e}")
 
+    def _calculate_detection_hash(self, detection_data: Dict[str, Any]) -> str:
+        """
+        Calculate a hash for detection data to prevent duplicate publishing.
+        
+        Args:
+            detection_data: Detection data dictionary
+            
+        Returns:
+            str: Hash representing the detection
+        """
+        # Create a signature from key detection properties
+        track_id = detection_data.get("track_id", "")
+        label = detection_data.get("label", "")
+        confidence = round(detection_data.get("confidence", 0), 3)  # Round to avoid float precision issues
+        
+        bbox = detection_data.get("bbox", {})
+        bbox_signature = f"{round(bbox.get('x_min', 0), 3)},{round(bbox.get('y_min', 0), 3)},{round(bbox.get('x_max', 0), 3)},{round(bbox.get('y_max', 0), 3)}"
+        
+        threat_level = detection_data.get("threat_level") or detection_data.get("metadata", {}).get("threat_level", "")
+        
+        # Create detection signature
+        signature = f"{track_id}:{label}:{confidence}:{bbox_signature}:{threat_level}"
+        
+        # Return hash
+        import hashlib
+        return hashlib.sha256(signature.encode()).hexdigest()[:16]
+
     async def publish_detection_event(self, detection_data: Dict[str, Any]) -> None:
-        """Publish detection event to JetStream using publisher abstraction."""
+        """Publish detection event to JetStream using publisher abstraction with idempotency."""
         if not self.js:
             return
 
         try:
+            # Calculate detection hash for idempotency
+            detection_hash = self._calculate_detection_hash(detection_data)
+            
+            # Skip if already published
+            if detection_hash in self._published_detection_hashes:
+                return
+            
             message = self.publisher.build_detection(detection_data)
             
             headers = {
                 "Content-Type": "application/json",
                 "Event-Type": "detection",
-                "Device-ID": self.device_fingerprint['device_id']
+                "Device-ID": self.device_fingerprint['device_id'],
+                "Detection-Hash": detection_hash  # Include hash in headers for debugging
             }
             
             # Add threat level header for C4ISR mode
@@ -256,6 +295,17 @@ class OverwatchCommunication:
                 json.dumps(message).encode(),
                 headers=headers
             )
+            
+            # Track published hash
+            self._published_detection_hashes.add(detection_hash)
+            
+            # Limit hash cache size to prevent memory growth
+            if len(self._published_detection_hashes) > 1000:
+                # Remove oldest 200 entries (FIFO)
+                hashes_to_remove = list(self._published_detection_hashes)[:200]
+                for h in hashes_to_remove:
+                    self._published_detection_hashes.discard(h)
+                    
         except Exception as e:
             print(f"Error publishing detection event: {e}")
     
@@ -264,9 +314,12 @@ class OverwatchCommunication:
         Publish tracking state to consolidated EntityState in KV store.
         Updates both 'detections' and 'analytics' subsignals.
         """
-        if not self.kv or not self.entity_id:
+        if not self.kv or not self.entity_id or self._state_update_lock:
             return
 
+        # Prevent concurrent state updates
+        self._state_update_lock = True
+        
         try:
             # Prepare detections data
             detections_data = {
@@ -308,6 +361,8 @@ class OverwatchCommunication:
 
         except Exception as e:
             print(f"Error publishing state to KV: {e}")
+        finally:
+            self._state_update_lock = False
     
     async def publish_threat_intelligence(self, tracking_state: Any) -> None:
         """
@@ -422,8 +477,9 @@ class OverwatchCommunication:
                     headers=headers
                 )
             else:
-                # JPEG fallback (legacy)
+                # MPEG-TS JPEG (optimized)
                 import cv2
+                import subprocess
                 h, w = frame.shape[:2]
                 max_dim = self.frame_stream_config.get("max_dimension", 1280)
                 quality = self.frame_stream_config.get("jpeg_quality", 75)
@@ -433,15 +489,47 @@ class OverwatchCommunication:
                     scale = max_dim / max(h, w)
                     frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
 
+                # Encode JPEG with OpenCV
                 _, jpeg_bytes = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-                jpeg_bytes = jpeg_bytes.tobytes()
+                
+                # Wrap JPEG in MPEG-TS using FFmpeg
+                try:
+                    ffmpeg_cmd = [
+                        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                        "-f", "image2pipe", "-vcodec", "mjpeg", 
+                        "-r", str(self.frame_stream_config.get("target_fps", 15)),
+                        "-i", "-",
+                        "-c:v", "copy", 
+                        "-muxrate", "2000k",
+                        "-pat_period", "1", 
+                        "-sdt_period", "1",
+                        "-f", "mpegts", "-"
+                    ]
+                    
+                    result = subprocess.run(
+                        ffmpeg_cmd,
+                        input=jpeg_bytes.tobytes(),
+                        capture_output=True,
+                        timeout=1.0
+                    )
+                    
+                    if result.returncode == 0:
+                        mpegts_bytes = result.stdout
+                    else:
+                        # Fallback to raw JPEG
+                        mpegts_bytes = jpeg_bytes.tobytes()
+                        
+                except Exception:
+                    # Fallback to raw JPEG
+                    mpegts_bytes = jpeg_bytes.tobytes()
 
                 self._frame_count += 1
 
                 headers = {
-                    "Content-Type": "image/jpeg",
-                    "Event-Type": "video_frame",
-                    "Codec": "jpeg",
+                    "Content-Type": "video/mp2t",
+                    "Event-Type": "video_frame", 
+                    "Codec": "mjpeg",
+                    "Container": "mpegts",
                     "Frame-Number": str(frame_number),
                     "Timestamp": timestamp,
                     "Width": str(frame.shape[1]),
@@ -452,13 +540,13 @@ class OverwatchCommunication:
                     "Device-ID": self.device_fingerprint['device_id'],
                     "Org-ID": self.organization_id,
                     "Entity-ID": self.entity_id,
-                    "Size-Bytes": str(len(jpeg_bytes)),
+                    "Size-Bytes": str(len(mpegts_bytes)),
                     "Quality": str(quality),
                 }
 
                 await self.js.publish(
                     self.video_subject,
-                    jpeg_bytes,
+                    mpegts_bytes,
                     headers=headers
                 )
 
