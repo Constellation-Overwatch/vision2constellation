@@ -37,6 +37,10 @@ class OverwatchCommunication:
         self._last_published_objects: Dict[str, Dict] = {}
         self._kv_cleanup_counter: int = 0
 
+        # Connection state tracking
+        self._is_reconnecting: bool = False
+        self._reconnection_in_progress: bool = False
+
         # Configuration
         self.nats_config = DEFAULT_CONFIG["nats"]
         self.frame_stream_config = DEFAULT_CONFIG["frame_stream"]
@@ -117,11 +121,11 @@ class OverwatchCommunication:
             "servers": [self.nats_config["url"]],
             # Reconnection settings
             "allow_reconnect": True,
-            "reconnect_time_wait": 2,  # 2 second wait between attempts
-            "max_reconnect_attempts": -1,  # Infinite reconnect attempts
-            "connect_timeout": 10,  # 10 second connection timeout
-            "ping_interval": 30,  # 30 second ping interval
-            "max_outstanding_pings": 2,  # Allow 2 pings without response
+            "reconnect_time_wait": self.nats_config["reconnect_time_wait"],
+            "max_reconnect_attempts": self.nats_config["max_reconnect_attempts"],
+            "connect_timeout": self.nats_config["connect_timeout"],
+            "ping_interval": self.nats_config["ping_interval"],
+            "max_outstanding_pings": self.nats_config["max_outstanding_pings"],
             # Connection callbacks
             "disconnected_cb": self._on_disconnected,
             "reconnected_cb": self._on_reconnected,
@@ -139,26 +143,43 @@ class OverwatchCommunication:
 
     async def _on_disconnected(self):
         """Handle NATS disconnection."""
+        self._is_reconnecting = True
         print("NATS connection lost - attempting reconnection...")
 
     async def _on_reconnected(self):
         """Handle NATS reconnection."""
+        if self._reconnection_in_progress:
+            return  # Prevent multiple simultaneous reconnection attempts
+        
+        self._reconnection_in_progress = True
         print("NATS connection restored!")
         
         # Re-initialize JetStream and KV after reconnection
         try:
-            await self._setup_jetstream()
+            self.js = self.nc.jetstream()
             await self._setup_kv_store()
             print("JetStream and KV store re-initialized after reconnection")
+            
+            # Clear reconnection flags
+            self._is_reconnecting = False
+            self._reconnection_in_progress = False
+            
+            # Clear entity state cache to force refresh
+            self._entity_state_cache = None
+            
         except Exception as e:
             print(f"Error re-initializing after reconnection: {e}")
+            self._reconnection_in_progress = False
 
     async def _on_error(self, error):
         """Handle NATS errors."""
-        print(f"NATS error: {error}")
+        # Don't spam error logs during reconnection attempts
+        if "Connect call failed" not in str(error) or not self._is_reconnecting:
+            print(f"NATS error: {error}")
 
     async def _on_closed(self):
         """Handle NATS connection closed."""
+        self._is_reconnecting = True
         print("NATS connection closed")
     
     async def _setup_jetstream(self) -> None:
@@ -309,8 +330,8 @@ class OverwatchCommunication:
         return hashlib.sha256(signature.encode()).hexdigest()[:16]
 
     async def _is_connected(self) -> bool:
-        """Check if NATS connection is healthy."""
-        return self.nc and self.nc.is_connected
+        """Check if NATS connection is healthy and not in reconnection state."""
+        return self.nc and self.nc.is_connected and not self._is_reconnecting
 
     async def publish_detection_event(self, detection_data: Dict[str, Any]) -> None:
         """Publish detection event to JetStream using publisher abstraction with idempotency."""
@@ -350,7 +371,9 @@ class OverwatchCommunication:
             self._published_detection_hashes.append(detection_hash)
                     
         except Exception as e:
-            print(f"Error publishing detection event: {e}")
+            # Only log errors if not during reconnection to avoid spam
+            if not self._is_reconnecting:
+                print(f"Error publishing detection event: {e}")
     
     def _should_publish_object_to_kv(self, obj: Dict[str, Any]) -> bool:
         """
@@ -514,7 +537,9 @@ class OverwatchCommunication:
                 print(f"Published {len(objects_to_publish)} changed objects to KV store")
 
         except Exception as e:
-            print(f"Error publishing state to KV: {e}")
+            # Only log errors if not during reconnection to avoid spam
+            if not self._is_reconnecting:
+                print(f"Error publishing state to KV: {e}")
         finally:
             self._state_update_lock = False
 
@@ -603,7 +628,9 @@ class OverwatchCommunication:
             self._entity_state_cache = entity_state
 
         except Exception as e:
-            print(f"Error publishing threat intelligence to KV: {e}")
+            # Only log errors if not during reconnection to avoid spam
+            if not self._is_reconnecting:
+                print(f"Error publishing threat intelligence to KV: {e}")
 
     async def publish_frame(
         self,
@@ -713,7 +740,9 @@ class OverwatchCommunication:
             return True
 
         except Exception as e:
-            print(f"Error publishing frame: {e}")
+            # Only log errors if not during reconnection to avoid spam
+            if not self._is_reconnecting:
+                print(f"Error publishing frame: {e}")
             return False
 
     def get_frame_stream_stats(self) -> Dict[str, Any]:
@@ -741,6 +770,18 @@ class OverwatchCommunication:
             }
 
         return stats
+
+    def get_connection_status(self) -> Dict[str, Any]:
+        """Get current connection status."""
+        return {
+            "connected": self.nc and self.nc.is_connected,
+            "is_reconnecting": self._is_reconnecting,
+            "reconnection_in_progress": self._reconnection_in_progress,
+            "jetstream_available": self.js is not None,
+            "kv_available": self.kv is not None,
+            "server_url": self.nats_config["url"],
+            "subject": self.subject,
+        }
 
     async def cleanup(self, final_analytics: Optional[Dict] = None) -> None:
         """Clean up connections and publish shutdown event using publisher abstraction."""

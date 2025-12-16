@@ -8,7 +8,13 @@ NATS_CONFIG = {
     "auth_token": os.getenv("NATS_AUTH_TOKEN"),
     "subject_root": os.getenv("NATS_SUBJECT_ROOT", "constellation.events.isr"),
     "stream_name": os.getenv("NATS_STREAM_NAME", "CONSTELLATION_EVENTS"),
-    "kv_store_name": os.getenv("NATS_KV_STORE_NAME", "CONSTELLATION_GLOBAL_STATE")
+    "kv_store_name": os.getenv("NATS_KV_STORE_NAME", "CONSTELLATION_GLOBAL_STATE"),
+    # Reconnection settings
+    "reconnect_time_wait": int(os.getenv("NATS_RECONNECT_WAIT", "1")),  # seconds between reconnect attempts
+    "max_reconnect_attempts": int(os.getenv("NATS_MAX_RECONNECT_ATTEMPTS", "-1")),  # -1 = infinite
+    "connect_timeout": int(os.getenv("NATS_CONNECT_TIMEOUT", "5")),  # connection timeout in seconds
+    "ping_interval": int(os.getenv("NATS_PING_INTERVAL", "20")),  # ping interval in seconds
+    "max_outstanding_pings": int(os.getenv("NATS_MAX_OUTSTANDING_PINGS", "2"))  # max pings without response
 }
 
 # Video configuration

@@ -44,20 +44,21 @@ class TrackingService:
     # Mode-specific update methods
     def update_detection(self, detection_id: Any, label: str, confidence: float,
                         bbox: Dict[str, float], frame_timestamp: str, 
-                        **kwargs) -> None:
-        """Update detection in tracking state."""
+                        **kwargs) -> Any:
+        """Update detection in tracking state. Returns the final track_id used."""
         if isinstance(self.state, C4ISRTrackingState):
             threat_level = kwargs.get('threat_level', 'NORMAL')
-            self.state.update_object(detection_id, label, confidence, bbox, 
-                                   frame_timestamp, threat_level)
+            return self.state.update_object(detection_id, label, confidence, bbox, 
+                                          frame_timestamp, threat_level)
         elif isinstance(self.state, SegmentationState):
             mask = kwargs.get('mask')
             area = kwargs.get('area', 0)
-            self.state.update_segment(detection_id, mask, bbox, area, 
-                                    confidence, frame_timestamp)
+            return self.state.update_segment(detection_id, mask, bbox, area, 
+                                           confidence, frame_timestamp)
         elif isinstance(self.state, TrackingState):
-            self.state.update_object(detection_id, label, confidence, bbox, 
-                                   frame_timestamp)
+            return self.state.update_object(detection_id, label, confidence, bbox, 
+                                          frame_timestamp, **kwargs)
+        return detection_id
     
     def get_threat_alerts(self) -> list:
         """Get threat alerts (C4ISR mode only)."""
