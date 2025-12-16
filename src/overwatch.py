@@ -32,7 +32,7 @@ from .config.defaults import DEFAULT_CONFIG
 from .utils.frame_encoder import calculate_frame_interval
 from .utils.args import parse_arguments, validate_arguments
 from .utils.device import get_device_fingerprint
-from .utils.signals import setup_signal_handlers
+from .utils.signals import setup_signal_handlers, is_shutdown_requested
 from .utils.logging import setup_logging
 from .services.detection import DetectorFactory
 from .services.tracking.service import TrackingService
@@ -292,6 +292,10 @@ class OverwatchOrchestrator:
 
                 # Display frame and check for quit
                 if self.video_service.display_frame(processed_frame):
+                    break
+                
+                # Check for shutdown signal
+                if is_shutdown_requested():
                     break
         
         finally:
