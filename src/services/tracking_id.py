@@ -31,6 +31,9 @@ class TrackingIDService:
         # Mapping: spatial_hash -> CUID for stable object identification
         self.spatial_mapping: Dict[str, str] = {}
         
+        # Reverse mapping: CUID -> current spatial_hash for tracking current positions
+        self.cuid_to_spatial: Dict[str, str] = {}
+        
         # Track object properties for stable ID generation
         self.object_history: Dict[str, Dict[str, Any]] = {}
 
@@ -67,7 +70,8 @@ class TrackingIDService:
         Get or create a stable CUID based on object properties.
         
         Uses spatial proximity and label matching to maintain consistent IDs
-        for the same physical object across frames.
+        for the same physical object across frames. Prevents CUID stealing by
+        checking if the current object already has an assigned CUID.
         
         Args:
             bbox: Normalized bounding box
@@ -86,7 +90,19 @@ class TrackingIDService:
         if spatial_hash in self.spatial_mapping:
             cuid = self.spatial_mapping[spatial_hash]
             self._update_object_history(cuid, bbox, label, confidence)
+            self._update_spatial_tracking(cuid, spatial_hash)
             return cuid
+        
+        # If native_id provided, check if we already have a CUID for it
+        if native_id is not None:
+            key = (model_type, native_id)
+            if key in self.id_mapping:
+                existing_cuid = self.id_mapping[key]
+                # Update spatial mapping for this existing CUID
+                self._update_spatial_mapping(existing_cuid, spatial_hash)
+                self._update_object_history(existing_cuid, bbox, label, confidence)
+                self._update_spatial_tracking(existing_cuid, spatial_hash)
+                return existing_cuid
         
         # Check for nearby objects with same label (handle slight movement)
         center_x = (bbox.get("x_min", 0) + bbox.get("x_max", 0)) / 2
@@ -107,14 +123,15 @@ class TrackingIDService:
                         
                         if distance <= similarity_threshold:
                             # Update mapping to new spatial hash
-                            del self.spatial_mapping[existing_hash]
-                            self.spatial_mapping[spatial_hash] = existing_cuid
+                            self._update_spatial_mapping(existing_cuid, spatial_hash)
                             self._update_object_history(existing_cuid, bbox, label, confidence)
+                            self._update_spatial_tracking(existing_cuid, spatial_hash)
                             return existing_cuid
         
         # No match found - create new CUID
         new_cuid = self.cuid_generator()
         self.spatial_mapping[spatial_hash] = new_cuid
+        self.cuid_to_spatial[new_cuid] = spatial_hash
         self._update_object_history(new_cuid, bbox, label, confidence)
         
         # Also maintain legacy mapping if native_id provided
@@ -142,6 +159,22 @@ class TrackingIDService:
 
         return self.id_mapping[key]
         
+    def _update_spatial_mapping(self, cuid: str, new_spatial_hash: str) -> None:
+        """Update spatial mapping when an object moves to a new position."""
+        # Remove old spatial mapping for this CUID
+        if cuid in self.cuid_to_spatial:
+            old_spatial_hash = self.cuid_to_spatial[cuid]
+            if old_spatial_hash in self.spatial_mapping:
+                del self.spatial_mapping[old_spatial_hash]
+        
+        # Add new spatial mapping
+        self.spatial_mapping[new_spatial_hash] = cuid
+        self.cuid_to_spatial[cuid] = new_spatial_hash
+
+    def _update_spatial_tracking(self, cuid: str, spatial_hash: str) -> None:
+        """Update the reverse mapping from CUID to spatial hash."""
+        self.cuid_to_spatial[cuid] = spatial_hash
+
     def _update_object_history(self, cuid: str, bbox: Dict[str, float], 
                               label: str, confidence: float) -> None:
         """Update object history for tracking."""
@@ -241,6 +274,15 @@ class TrackingIDService:
         
         for spatial_hash in stale_spatial_keys:
             del self.spatial_mapping[spatial_hash]
+            
+        # Clean up reverse spatial mapping
+        stale_cuid_keys = [
+            cuid for cuid in self.cuid_to_spatial.keys()
+            if cuid not in active_ids
+        ]
+        
+        for cuid in stale_cuid_keys:
+            del self.cuid_to_spatial[cuid]
             
         # Clean up object history
         stale_cuids = [
