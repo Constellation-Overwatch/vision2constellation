@@ -3,6 +3,7 @@
 import json
 import nats
 import numpy as np
+from collections import deque
 from nats.js.api import KeyValueConfig
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
@@ -28,9 +29,13 @@ class OverwatchCommunication:
         self._entity_state_cache: Optional[Dict] = None  # Cache for entity state
         self.detection_mode: Optional[str] = None
         
-        # Idempotency tracking for detection events
-        self._published_detection_hashes: set = set()
+        # Idempotency tracking for detection events (FIFO with automatic eviction)
+        self._published_detection_hashes: deque = deque(maxlen=1000)
         self._state_update_lock: bool = False
+        
+        # KV store object tracking for incremental updates
+        self._last_published_objects: Dict[str, Dict] = {}
+        self._kv_cleanup_counter: int = 0
 
         # Configuration
         self.nats_config = DEFAULT_CONFIG["nats"]
@@ -105,10 +110,24 @@ class OverwatchCommunication:
         await self._publish_bootsequence()
     
     async def _connect_nats(self) -> None:
-        """Connect to NATS server with optional token authentication."""
+        """Connect to NATS server with reconnection handling and optional token authentication."""
         print(f"Attempting to connect to NATS at: {self.nats_config['url']}")
 
-        connect_opts = {"servers": [self.nats_config["url"]]}
+        connect_opts = {
+            "servers": [self.nats_config["url"]],
+            # Reconnection settings
+            "allow_reconnect": True,
+            "reconnect_time_wait": 2,  # 2 second wait between attempts
+            "max_reconnect_attempts": -1,  # Infinite reconnect attempts
+            "connect_timeout": 10,  # 10 second connection timeout
+            "ping_interval": 30,  # 30 second ping interval
+            "max_outstanding_pings": 2,  # Allow 2 pings without response
+            # Connection callbacks
+            "disconnected_cb": self._on_disconnected,
+            "reconnected_cb": self._on_reconnected,
+            "error_cb": self._on_error,
+            "closed_cb": self._on_closed,
+        }
 
         # Token-based authentication
         if self.nats_config.get("auth_token"):
@@ -117,6 +136,30 @@ class OverwatchCommunication:
 
         self.nc = await nats.connect(**connect_opts)
         print("Connected to NATS server")
+
+    async def _on_disconnected(self):
+        """Handle NATS disconnection."""
+        print("NATS connection lost - attempting reconnection...")
+
+    async def _on_reconnected(self):
+        """Handle NATS reconnection."""
+        print("NATS connection restored!")
+        
+        # Re-initialize JetStream and KV after reconnection
+        try:
+            await self._setup_jetstream()
+            await self._setup_kv_store()
+            print("JetStream and KV store re-initialized after reconnection")
+        except Exception as e:
+            print(f"Error re-initializing after reconnection: {e}")
+
+    async def _on_error(self, error):
+        """Handle NATS errors."""
+        print(f"NATS error: {error}")
+
+    async def _on_closed(self):
+        """Handle NATS connection closed."""
+        print("NATS connection closed")
     
     async def _setup_jetstream(self) -> None:
         """Setup JetStream context."""
@@ -265,9 +308,13 @@ class OverwatchCommunication:
         import hashlib
         return hashlib.sha256(signature.encode()).hexdigest()[:16]
 
+    async def _is_connected(self) -> bool:
+        """Check if NATS connection is healthy."""
+        return self.nc and self.nc.is_connected
+
     async def publish_detection_event(self, detection_data: Dict[str, Any]) -> None:
         """Publish detection event to JetStream using publisher abstraction with idempotency."""
-        if not self.js:
+        if not self.js or not await self._is_connected():
             return
 
         try:
@@ -299,80 +346,226 @@ class OverwatchCommunication:
                 headers=headers
             )
             
-            # Track published hash
-            self._published_detection_hashes.add(detection_hash)
-            
-            # Limit hash cache size to prevent memory growth
-            if len(self._published_detection_hashes) > 1000:
-                # Remove oldest 200 entries (FIFO)
-                hashes_to_remove = list(self._published_detection_hashes)[:200]
-                for h in hashes_to_remove:
-                    self._published_detection_hashes.discard(h)
+            # Track published hash (automatic FIFO eviction when maxlen exceeded)
+            self._published_detection_hashes.append(detection_hash)
                     
         except Exception as e:
             print(f"Error publishing detection event: {e}")
     
+    def _should_publish_object_to_kv(self, obj: Dict[str, Any]) -> bool:
+        """
+        Determine if an object should be published to KV store based on quality thresholds.
+        
+        Args:
+            obj: Object data dictionary
+            
+        Returns:
+            bool: True if object meets publishing criteria
+        """
+        kv_confidence_threshold = DEFAULT_CONFIG["detection"]["kv_confidence_threshold"]
+        
+        # Check confidence threshold
+        avg_confidence = obj.get("avg_confidence", 0)
+        if avg_confidence < kv_confidence_threshold:
+            return False
+            
+        # Require minimum frame persistence for stability
+        frame_count = obj.get("frame_count", 0)
+        if frame_count < 5:  # More frames required for KV than general tracking
+            return False
+            
+        # Must be currently active
+        if not obj.get("is_active", False):
+            return False
+            
+        return True
+
+    def _has_object_changed(self, track_id: str, current_obj: Dict[str, Any]) -> bool:
+        """
+        Check if an object has significantly changed since last KV publish.
+        
+        Args:
+            track_id: Unique track identifier
+            current_obj: Current object data
+            
+        Returns:
+            bool: True if object has changed enough to warrant KV update
+        """
+        if track_id not in self._last_published_objects:
+            return True  # New object
+            
+        last_obj = self._last_published_objects[track_id]
+        
+        # Check confidence change (>10% change)
+        confidence_diff = abs(current_obj.get("avg_confidence", 0) - last_obj.get("avg_confidence", 0))
+        if confidence_diff > 0.1:
+            return True
+            
+        # Check frame count change (new activity)
+        frame_diff = current_obj.get("frame_count", 0) - last_obj.get("frame_count", 0)
+        if frame_diff > 5:  # Significant new activity
+            return True
+            
+        # Check bbox movement (>5% change in position)
+        current_bbox = current_obj.get("current_bbox", {})
+        last_bbox = last_obj.get("current_bbox", {})
+        if current_bbox and last_bbox:
+            for coord in ["x_min", "y_min", "x_max", "y_max"]:
+                diff = abs(current_bbox.get(coord, 0) - last_bbox.get(coord, 0))
+                if diff > 0.05:  # 5% movement threshold
+                    return True
+                    
+        # Check threat level change
+        if current_obj.get("threat_level") != last_obj.get("threat_level"):
+            return True
+            
+        return False
+
     async def publish_state_to_kv(self, tracking_state: Any, analytics: Dict[str, Any]) -> None:
         """
-        Publish tracking state to consolidated EntityState in KV store.
-        Updates both 'detections' and 'analytics' subsignals.
+        Publish tracking state to consolidated EntityState in KV store with incremental updates.
+        Updates both 'detections' and 'analytics' subsignals, only publishing changed/new objects.
         """
-        if not self.kv or not self.entity_id or self._state_update_lock:
+        if not self.kv or not self.entity_id or self._state_update_lock or not await self._is_connected():
             return
 
         # Prevent concurrent state updates
         self._state_update_lock = True
         
         try:
-            # Prepare detections data
-            detections_data = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "objects": {}
-            }
-
-            # Add tracking objects if available
+            # Get current persistent objects
+            persistent_objects = {}
             if hasattr(tracking_state, 'get_persistent_objects'):
                 persistent_objects = tracking_state.get_persistent_objects(min_frames=3)
-                detections_data["objects"] = {
-                    str(tid): {
-                        "track_id": obj.get("track_id", obj.get("segment_id", tid)),
-                        "label": obj.get("label", "segment"),
-                        "category": obj.get("category"),  # RT-DETR category (person, vehicle, etc.)
-                        "priority": obj.get("priority"),  # RT-DETR priority level
-                        "first_seen": obj["first_seen"],
-                        "last_seen": obj["last_seen"],
-                        "frame_count": obj["frame_count"],
-                        "avg_confidence": obj.get("avg_confidence", 0),
-                        "is_active": obj["is_active"],
-                        "threat_level": obj.get("threat_level"),  # C4ISR threat level
-                        "suspicious_indicators": obj.get("suspicious_indicators", []),
-                        "area": obj.get("area"),
-                        "current_bbox": obj.get("bbox_history", [])[-1] if obj.get("bbox_history") else obj.get("bbox")
-                    }
-                    for tid, obj in persistent_objects.items()
+            
+            # Filter objects that meet KV publishing criteria and have changed
+            objects_to_publish = {}
+            current_active_tracks = set()
+            
+            for tid, obj in persistent_objects.items():
+                track_id = str(tid)
+                current_active_tracks.add(track_id)
+                
+                # Apply quality filters
+                if not self._should_publish_object_to_kv(obj):
+                    continue
+                    
+                # Check if object has changed enough to warrant update
+                if not self._has_object_changed(track_id, obj):
+                    continue
+                
+                # Format object for KV store
+                formatted_obj = {
+                    "track_id": obj.get("track_id", obj.get("segment_id", tid)),
+                    "label": obj.get("label", "segment"),
+                    "category": obj.get("category"),
+                    "priority": obj.get("priority"),
+                    "first_seen": obj["first_seen"],
+                    "last_seen": obj["last_seen"],
+                    "frame_count": obj["frame_count"],
+                    "avg_confidence": obj.get("avg_confidence", 0),
+                    "is_active": obj["is_active"],
+                    "threat_level": obj.get("threat_level"),
+                    "suspicious_indicators": obj.get("suspicious_indicators", []),
+                    "area": obj.get("area"),
+                    "current_bbox": obj.get("bbox_history", [])[-1] if obj.get("bbox_history") else obj.get("bbox")
                 }
-
-            # Prepare analytics data
-            analytics_data = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "summary": analytics
-            }
-
-            # Update EntityState with both subsignals
-            await self._update_entity_state("detections", detections_data)
-            await self._update_entity_state("analytics", analytics_data)
+                
+                objects_to_publish[track_id] = formatted_obj
+                # Update our tracking cache
+                self._last_published_objects[track_id] = formatted_obj.copy()
+            
+            # Periodic cleanup of stale objects from tracking cache
+            self._kv_cleanup_counter += 1
+            if self._kv_cleanup_counter >= 50:  # Every 50 updates
+                await self._cleanup_stale_kv_objects(current_active_tracks)
+                self._kv_cleanup_counter = 0
+            
+            # Only update KV if we have changes to publish
+            if objects_to_publish:
+                # Get current entity state
+                entity_state = await self._get_entity_state()
+                
+                # Update detections incrementally
+                if "detections" not in entity_state:
+                    entity_state["detections"] = {"timestamp": "", "objects": {}}
+                
+                # Merge new/updated objects with existing ones
+                entity_state["detections"]["timestamp"] = datetime.now(timezone.utc).isoformat()
+                entity_state["detections"]["objects"].update(objects_to_publish)
+                
+                # Update analytics
+                entity_state["analytics"] = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "summary": analytics
+                }
+                
+                entity_state["updated_at"] = datetime.now(timezone.utc).isoformat()
+                
+                # Write consolidated state to KV
+                await self.kv.put(
+                    self.entity_id,
+                    json.dumps(entity_state).encode()
+                )
+                
+                # Update cache
+                self._entity_state_cache = entity_state
+                
+                print(f"Published {len(objects_to_publish)} changed objects to KV store")
 
         except Exception as e:
             print(f"Error publishing state to KV: {e}")
         finally:
             self._state_update_lock = False
+
+    async def _cleanup_stale_kv_objects(self, current_active_tracks: set) -> None:
+        """
+        Remove stale/inactive objects from KV store and internal tracking.
+        
+        Args:
+            current_active_tracks: Set of currently active track IDs
+        """
+        try:
+            entity_state = await self._get_entity_state()
+            
+            if "detections" not in entity_state or "objects" not in entity_state["detections"]:
+                return
+                
+            objects_dict = entity_state["detections"]["objects"]
+            stale_tracks = []
+            
+            # Identify objects to remove (not in current active tracks)
+            for track_id in list(objects_dict.keys()):
+                if track_id not in current_active_tracks:
+                    stale_tracks.append(track_id)
+            
+            # Remove stale objects from KV store
+            if stale_tracks:
+                for track_id in stale_tracks:
+                    objects_dict.pop(track_id, None)
+                    self._last_published_objects.pop(track_id, None)
+                
+                # Update KV store
+                entity_state["detections"]["timestamp"] = datetime.now(timezone.utc).isoformat()
+                entity_state["updated_at"] = datetime.now(timezone.utc).isoformat()
+                
+                await self.kv.put(
+                    self.entity_id,
+                    json.dumps(entity_state).encode()
+                )
+                
+                self._entity_state_cache = entity_state
+                print(f"Cleaned up {len(stale_tracks)} stale objects from KV store")
+                
+        except Exception as e:
+            print(f"Error during KV cleanup: {e}")
     
     async def publish_threat_intelligence(self, tracking_state: Any) -> None:
         """
         Publish C4ISR threat intelligence to consolidated EntityState.
         Updates 'c4isr' subsignal and enriches 'analytics' with C4ISR summary.
         """
-        if not self.kv or not hasattr(tracking_state, 'threat_alerts'):
+        if not self.kv or not hasattr(tracking_state, 'threat_alerts') or not await self._is_connected():
             return
 
         try:
@@ -441,7 +634,7 @@ class OverwatchCommunication:
         Returns:
             True if published successfully, False otherwise
         """
-        if not self.js or not self.frame_stream_enabled or not self.video_subject:
+        if not self.js or not self.frame_stream_enabled or not self.video_subject or not await self._is_connected():
             return False
 
         try:

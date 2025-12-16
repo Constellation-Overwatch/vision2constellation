@@ -26,6 +26,7 @@ VIDEO_CONFIG = {
 # Detection configuration  
 DETECTION_CONFIG = {
     "confidence_threshold": 0.25,
+    "kv_confidence_threshold": 0.5,  # Higher threshold for KV store publishing
     "min_frames_tracking": 3,
     "min_frames_c4isr": 1,  # Immediate threat alerts
     "imgsz": 1024,  # For SAM2
