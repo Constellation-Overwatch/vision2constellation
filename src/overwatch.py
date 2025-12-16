@@ -244,6 +244,9 @@ class OverwatchOrchestrator:
                 for disappeared_id in disappeared_ids:
                     del self.last_published_state[disappeared_id]
 
+                # Clean up tracking ID service mappings to prevent memory leak
+                self.detector.tracking_id_service.cleanup_stale_ids(current_ids)
+
                 # Publish state to KV store for persistent objects
                 persistent_objects = self.tracking_service.get_persistent_objects(args.min_frames)
                 if persistent_objects:
