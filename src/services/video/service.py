@@ -390,10 +390,11 @@ class VideoService:
                         if ret and frame is not None:
                             self.last_good_frame = frame.copy()
                             return True, frame
-
-                    # Reconnect failed - signal to stop
-                    print(f"✗ Reconnection failed after {self.total_reconnects} attempts")
-                    return False, None
+                        # Post-reconnect read failed - fall through to normal error recovery
+                    else:
+                        # Reconnect failed - signal to stop
+                        print(f"✗ Reconnection failed after {self.total_reconnects} attempts")
+                        return False, None
 
                 # Return last good frame to maintain continuity (skip corrupted frame)
                 if self.last_good_frame is not None:
