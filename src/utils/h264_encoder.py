@@ -66,7 +66,7 @@ class H264Encoder:
         self._start_time: Optional[float] = None
         self._input_resolution: Tuple[int, int] = (0, 0)
 
-        # Keyframe tracking (GOP-based estimation)
+        # Keyframe tracking
         self._last_keyframe_sequence = 0
 
     def start(self, input_width: int, input_height: int) -> bool:
@@ -148,6 +148,51 @@ class H264Encoder:
             print(f"Error starting H.264 encoder: {e}")
             return False
 
+    def _detect_keyframe_in_chunk(self, chunk_data: bytes) -> bool:
+        """
+        Detect if chunk contains H.264 IDR frame by parsing MPEG-TS packets.
+
+        Returns True if any TS packet in the chunk contains an IDR NAL unit (type 5).
+        """
+        # Parse 188-byte TS packets in the chunk
+        for i in range(0, len(chunk_data), self.TS_PACKET_SIZE):
+            packet = chunk_data[i:i + self.TS_PACKET_SIZE]
+            if len(packet) < self.TS_PACKET_SIZE:
+                continue
+
+            # Check sync byte (0x47)
+            if packet[0] != 0x47:
+                continue
+
+            # Parse adaptation field and payload
+            adaptation_field_control = (packet[3] >> 4) & 0x03
+            has_payload = adaptation_field_control in (0x01, 0x03)
+
+            if not has_payload:
+                continue
+
+            # Calculate payload offset
+            offset = 4
+            if adaptation_field_control in (0x02, 0x03):  # Has adaptation field
+                adaptation_length = packet[4]
+                offset += 1 + adaptation_length
+
+            if offset >= len(packet):
+                continue
+
+            # Search for H.264 NAL start codes (0x00 0x00 0x01 or 0x00 0x00 0x00 0x01)
+            payload = packet[offset:]
+            for j in range(len(payload) - 4):
+                if payload[j:j+3] == b'\x00\x00\x01' or payload[j:j+4] == b'\x00\x00\x00\x01':
+                    # Found NAL start code, check NAL unit type
+                    nal_offset = j + 3 if payload[j:j+3] == b'\x00\x00\x01' else j + 4
+                    if nal_offset < len(payload):
+                        nal_unit_type = payload[nal_offset] & 0x1F
+                        if nal_unit_type == 5:  # IDR frame
+                            return True
+
+        return False
+
     def _read_output_loop(self) -> None:
         """Background thread: read MPEG-TS chunks from FFmpeg."""
         while self._running and self._process and self._process.stdout:
@@ -161,15 +206,14 @@ class H264Encoder:
                 self._chunk_sequence += 1
                 self._bytes_encoded += len(chunk_data)
 
-                # Estimate keyframe based on GOP
-                frames_since_keyframe = self._frame_count % self.gop_size
-                is_keyframe = frames_since_keyframe == 0 or self._frame_count <= 1
+                # Detect keyframe by parsing MPEG-TS/H.264 NAL units
+                is_keyframe = self._detect_keyframe_in_chunk(chunk_data)
 
                 chunk = EncodedChunk(
                     data=chunk_data,
                     sequence=self._chunk_sequence,
                     is_keyframe=is_keyframe,
-                    pts=int(self._frame_count * (90000 / self.fps)),  # 90kHz PTS
+                    pts=int(self._chunk_sequence * (90000 / self.fps)),  # Use sequence for PTS
                 )
 
                 # Non-blocking put with overflow handling
