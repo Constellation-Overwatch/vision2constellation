@@ -20,7 +20,7 @@ def get_constellation_ids(
     print()
 
     # Try to get organization_id: CLI > env > input
-    org_id = cli_org_id or os.environ.get('CONSTELLATION_ORG_ID')
+    org_id = (cli_org_id or os.environ.get('CONSTELLATION_ORG_ID') or '').strip()
     if not org_id:
         print("Organization ID not found in environment (CONSTELLATION_ORG_ID)")
         print("Please obtain your Organization ID from:")
@@ -36,7 +36,7 @@ def get_constellation_ids(
         print(f"Organization ID loaded from {source}: {org_id}")
 
     # Try to get entity_id: CLI > env > input
-    ent_id = cli_entity_id or os.environ.get('CONSTELLATION_ENTITY_ID')
+    ent_id = (cli_entity_id or os.environ.get('CONSTELLATION_ENTITY_ID') or '').strip()
     if not ent_id:
         print("Entity ID not found in environment (CONSTELLATION_ENTITY_ID)")
         print("Please obtain your Entity ID from:")
