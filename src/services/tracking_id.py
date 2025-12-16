@@ -65,7 +65,7 @@ class TrackingIDService:
 
     def get_stable_cuid(self, bbox: Dict[str, float], label: str, confidence: float, 
                        native_id: Any = None, model_type: str = "default",
-                       similarity_threshold: float = 0.15) -> str:
+                       similarity_threshold: float = 0.05) -> str:
         """
         Get or create a stable CUID based on object properties.
         
@@ -105,8 +105,12 @@ class TrackingIDService:
                 return existing_cuid
         
         # Check for nearby objects with same label (handle slight movement)
+        # Find the closest match within threshold to prevent CUID stealing
         center_x = (bbox.get("x_min", 0) + bbox.get("x_max", 0)) / 2
         center_y = (bbox.get("y_min", 0) + bbox.get("y_max", 0)) / 2
+        
+        closest_cuid = None
+        closest_distance = float('inf')
         
         for existing_hash, existing_cuid in self.spatial_mapping.items():
             if existing_cuid in self.object_history:
@@ -121,12 +125,17 @@ class TrackingIDService:
                         
                         distance = math.sqrt((center_x - last_center_x)**2 + (center_y - last_center_y)**2)
                         
-                        if distance <= similarity_threshold:
-                            # Update mapping to new spatial hash
-                            self._update_spatial_mapping(existing_cuid, spatial_hash)
-                            self._update_object_history(existing_cuid, bbox, label, confidence)
-                            self._update_spatial_tracking(existing_cuid, spatial_hash)
-                            return existing_cuid
+                        if distance <= similarity_threshold and distance < closest_distance:
+                            closest_distance = distance
+                            closest_cuid = existing_cuid
+        
+        # Only assign to the closest CUID if found
+        if closest_cuid is not None:
+            # Update mapping to new spatial hash
+            self._update_spatial_mapping(closest_cuid, spatial_hash)
+            self._update_object_history(closest_cuid, bbox, label, confidence)
+            self._update_spatial_tracking(closest_cuid, spatial_hash)
+            return closest_cuid
         
         # No match found - create new CUID
         new_cuid = self.cuid_generator()
