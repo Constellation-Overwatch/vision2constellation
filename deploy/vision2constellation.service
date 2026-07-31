@@ -1,0 +1,22 @@
+[Unit]
+Description=Constellation C4 Threat ISR vision pipeline
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/AppDev-SIM/gus/constellation/vision2constellation
+EnvironmentFile=%h/.config/vision2constellation/runtime.env
+EnvironmentFile=%h/.config/vision2constellation/secret.env
+ExecStart=%h/AppDev-SIM/gus/constellation/vision2constellation/deploy/run-vision-service.sh
+Restart=always
+RestartSec=15
+TimeoutStopSec=30
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+UMask=0077
+
+[Install]
+WantedBy=default.target
