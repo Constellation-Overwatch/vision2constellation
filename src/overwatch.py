@@ -178,6 +178,8 @@ class OverwatchOrchestrator:
         
         try:
             while True:
+                # Let NATS flush buffered events and answer pings on every frame.
+                await asyncio.sleep(0)
                 # Read frame (video service handles RTSP errors internally)
                 ret, frame = self.video_service.read_frame()
                 if not ret or frame is None:
